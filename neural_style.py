@@ -207,7 +207,6 @@ def main():
             output_file = options.output
         if output_file:
             imsave(output_file, combined_rgb)
-        print('done')
 
 def imread(path):
     img = scipy.misc.imread(path).astype(np.float)

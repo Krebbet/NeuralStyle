@@ -30,7 +30,8 @@ except NameError:
 def stylize(network, initial, initial_noiseblend, content, styles, preserve_colors, iterations,
         content_weight, content_weight_blend, style_weight, style_layer_weight_exp, style_blend_weights, tv_weight,
         learning_rate, beta1, beta2, epsilon, pooling,
-        print_iterations=None, checkpoint_iterations=None):
+        print_iterations=None, checkpoint_iterations=None,
+        rContent=False,rStyle=False,label='label'):
     """
     Stylize images.
 
@@ -41,6 +42,7 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
     :rtype: iterator[tuple[int|None,image]]
     """
     
+    print(rContent,rStyle)
     print('Stylize Begin')
     
     # creates the shapes for the 'content' image and the array of 'style' images
@@ -72,40 +74,44 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
         style_layers_weights[style_layer] /= layer_weights_sum
     
     print('Compute Content')
-    # compute content features in feedforward mode
-    # This is effectively a constant during processing...
-    g = tf.Graph()
-    with g.as_default(), g.device('/cpu:0'), tf.Session() as sess:
-        image = tf.placeholder('float', shape=shape)
-        net = vgg.net_preloaded(vgg_weights, image, pooling)
-        #preprocess the input image
-        content_pre = np.array([vgg.preprocess(content, vgg_mean_pixel)])
-        # calculate the 'content' in each conv layer.
-        # Q: this seems inefficient since it calcs each layer seperately..
-        #  is there a way to do one calc and access all the values???
-        for layer in CONTENT_LAYERS:
-            content_features[layer] = net[layer].eval(feed_dict={image: content_pre})
+    #if a style set to zero.
+    if rStyle == False:
+      # compute content features in feedforward mode
+      # This is effectively a constant during processing...    
+      g = tf.Graph()
+      with g.as_default(), g.device('/cpu:0'), tf.Session() as sess:
+          image = tf.placeholder('float', shape=shape)
+          net = vgg.net_preloaded(vgg_weights, image, pooling)
+          #preprocess the input image
+          content_pre = np.array([vgg.preprocess(content, vgg_mean_pixel)])
+          # calculate the 'content' in each conv layer.
+          # Q: this seems inefficient since it calcs each layer seperately..
+          #  is there a way to do one calc and access all the values???
+          for layer in CONTENT_LAYERS:
+              content_features[layer] = net[layer].eval(feed_dict={image: content_pre})
 
     print('Compute Style')
-    # compute style features in feedforward mode
-    # this again will be a constant in the routine...
-    for i in range(len(styles)):
-        g = tf.Graph()
-        with g.as_default(), g.device('/cpu:0'), tf.Session() as sess:
-            #set input placeholder shape
-            image = tf.placeholder('float', shape=style_shapes[i])
-            # load the vgg conv portion of the net
-            net = vgg.net_preloaded(vgg_weights, image, pooling)
-            # preprocess the input image
-            style_pre = np.array([vgg.preprocess(styles[i], vgg_mean_pixel)])
-            for layer in STYLE_LAYERS:
-                # feed in the image to each layer of the net
-                # note: this might be where the thing is slow... are we calculating the first layer 5 times???
-                features = net[layer].eval(feed_dict={image: style_pre})
-                features = np.reshape(features, (-1, features.shape[3]))# what is this for???
-                # calculate the gram.
-                gram = np.matmul(features.T, features) / features.size
-                style_features[i][layer] = gram
+    if rContent == False:
+
+      # compute style features in feedforward mode
+      # this again will be a constant in the routine...
+      for i in range(len(styles)):
+          g = tf.Graph()
+          with g.as_default(), g.device('/cpu:0'), tf.Session() as sess:
+              #set input placeholder shape
+              image = tf.placeholder('float', shape=style_shapes[i])
+              # load the vgg conv portion of the net
+              net = vgg.net_preloaded(vgg_weights, image, pooling)
+              # preprocess the input image
+              style_pre = np.array([vgg.preprocess(styles[i], vgg_mean_pixel)])
+              for layer in STYLE_LAYERS:
+                  # feed in the image to each layer of the net
+                  # note: this might be where the thing is slow... are we calculating the first layer 5 times???
+                  features = net[layer].eval(feed_dict={image: style_pre})
+                  features = np.reshape(features, (-1, features.shape[3]))# what is this for???
+                  # calculate the gram.
+                  gram = np.matmul(features.T, features) / features.size
+                  style_features[i][layer] = gram
 
                 
     # We now have the content tensor and the style tensor for our loss functions...
@@ -144,32 +150,38 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
         
         
         with tf.name_scope('Content_Loss'):
-          # create calculate content loss operation.
-          content_losses = []
-          for content_layer in CONTENT_LAYERS:
-              content_losses.append(content_layers_weights[content_layer] * content_weight * (2 * tf.nn.l2_loss(
-                      net[content_layer] - content_features[content_layer]) /
-                      content_features[content_layer].size))
-          content_loss += reduce(tf.add, content_losses)
+
+          if rStyle == True:
+            content_loss = tf.constant(0,dtype = 'float32')
+          else:  
+            # create calculate content loss operation.
+            content_losses = []
+            for content_layer in CONTENT_LAYERS:
+                content_losses.append(content_layers_weights[content_layer] * content_weight * (2 * tf.nn.l2_loss(
+                        net[content_layer] - content_features[content_layer]) /
+                        content_features[content_layer].size))
+            content_loss += reduce(tf.add, content_losses)
 
           
           
         with tf.name_scope('Style_Loss'):
-          
-          # create style loss operation
-          # style loss
-          style_loss = 0
-          for i in range(len(styles)):
-              style_losses = []
-              for style_layer in STYLE_LAYERS:
-                  layer = net[style_layer]
-                  _, height, width, number = map(lambda i: i.value, layer.get_shape())
-                  size = height * width * number
-                  feats = tf.reshape(layer, (-1, number))
-                  gram = tf.matmul(tf.transpose(feats), feats) / size
-                  style_gram = style_features[i][style_layer]
-                  style_losses.append(style_layers_weights[style_layer] * 2 * tf.nn.l2_loss(gram - style_gram) / style_gram.size)
-              style_loss += style_weight * style_blend_weights[i] * reduce(tf.add, style_losses)
+          if rContent == True:
+            style_loss = tf.constant(0,dtype = 'float32')
+          else:
+            # create style loss operation
+            # style loss
+            style_loss = 0
+            for i in range(len(styles)):
+                style_losses = []
+                for style_layer in STYLE_LAYERS:
+                    layer = net[style_layer]
+                    _, height, width, number = map(lambda i: i.value, layer.get_shape())
+                    size = height * width * number
+                    feats = tf.reshape(layer, (-1, number))
+                    gram = tf.matmul(tf.transpose(feats), feats) / size
+                    style_gram = style_features[i][style_layer]
+                    style_losses.append(style_layers_weights[style_layer] * 2 * tf.nn.l2_loss(gram - style_gram) / style_gram.size)
+                style_loss += style_weight * style_blend_weights[i] * reduce(tf.add, style_losses)
         
         
         with tf.name_scope('TVD_Loss'):
@@ -205,7 +217,7 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
         best = None
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
-            writer = tf.summary.FileWriter(LOGDIR)
+            writer = tf.summary.FileWriter(os.path.join(LOGDIR , label))
             writer.add_graph(sess.graph)            
             
             stderr.write('Optimization started...\n')
@@ -271,6 +283,9 @@ def stylize(network, initial, initial_noiseblend, content, styles, preserve_colo
                         img_out = np.array(Image.fromarray(combined_yuv, 'YCbCr').convert('RGB'))
 
 
+                    #lName = '%s%d' % (label ,i)
+                    #im_sum = tf.summary.image(lName, img_out, 1)
+                    #writer.add_summary(im_sum)
                     yield (
                         (None if last_step else i),
                         img_out
